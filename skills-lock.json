@@ -1,0 +1,65 @@
+{
+  "version": 2,
+  "skills": {
+    "accessibility": {
+      "source": "addyosmani/web-quality-skills",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "bun": {
+      "source": "midudev/autoskills",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "composition-patterns": {
+      "source": "vercel-labs/agent-skills",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "next-cache-components-adoption": {
+      "source": "vercel/next.js",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "react-best-practices": {
+      "source": "vercel-labs/agent-skills",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "seo": {
+      "source": "addyosmani/web-quality-skills",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "stageshow": {
+      "source": "../../skill/benjitaylor-skills",
+      "sourceType": "local",
+      "computedHash": "faaf72b41c206b98da5788093eb07fcdceb80dee90b5dc6dd921048196279474"
+    },
+    "tailwind-css-patterns": {
+      "source": "giuseppe-trisciuoglio/developer-kit",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "typescript-advanced-types": {
+      "source": "wshobson/agents",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "use-ai-sdk": {
+      "source": "vercel/ai",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    },
+    "zod": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "autoskills-registry",
+      "computedHash": ""
+    }
+  }
+}
