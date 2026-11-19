@@ -1,0 +1,313 @@
+---
+title: MCP et agents IA
+description: Exposer le coffre à un agent sans lui donner un seul secret — jetons cloisonnés, six outils, injection CDP et vault_exec.
+---
+
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+Akooti expose un **serveur MCP sur stdio**, lancé par l'agent lui-même :
+
+```bash
+akooti mcp --token ak_mcp_…
+```
+
+Ce processus ne détient **ni clé maître ni secret**. Il relaie chaque appel vers
+le socket local du daemon, qui vérifie le jeton, les portées et les dossiers
+autorisés, puis agit. L'agent ne reçoit que des métadonnées et des
+comptes-rendus.
+
+## Créer un jeton cloisonné
+
+<Steps>
+<Step>
+
+Ouvrir l'application déverrouillée → **Accès IA** → **Créer un jeton**.
+
+</Step>
+<Step>
+
+Nommer le jeton (le nom apparaît dans le journal d'audit), choisir une durée de
+vie en jours — **0 = illimité**, 30 jours est un bon défaut.
+
+</Step>
+<Step>
+
+Cocher les portées nécessaires :
+
+| Portée | Libellé dans l'interface | Ouvre |
+| --- | --- | --- |
+| `read_metadata` | Lire les métadonnées | `vault_search` — titres, identifiants, URL |
+| `blind_fill` | Remplir aveuglément | `vault_cdp_autofill`, `vault_blind_autofill` |
+| `create_and_fill` | Créer un compte éphémère | `vault_create_and_fill` |
+| `exec_env` | Injecter dans un processus | `vault_exec` |
+
+</Step>
+<Step>
+
+Choisir les **dossiers autorisés**. Le cloisonnement est strict : une entrée
+hors de ces dossiers est invisible, et un id deviné répond `not_found`.
+
+</Step>
+<Step>
+
+Copier le secret **une seule fois** : `ak_mcp_` suivi de 64 caractères
+hexadécimaux. Seul son SHA-256 est stocké.
+
+</Step>
+</Steps>
+
+Un jeton peut être révoqué à tout instant ; la révocation est immédiate car le
+daemon revérifie à chaque appel.
+
+<Callout type="info" title="Un jeton par agent, pas un jeton pour tous">
+
+Jetons séparés par agent et par projet, portées minimales, dossiers minimaux.
+Un jeton `read_metadata` seul permet à un agent de *savoir* quels comptes
+existent sans jamais pouvoir remplir un formulaire ; un jeton `exec_env` limité
+au dossier **Agents & MCP** permet de lancer un conteneur sans exposer votre
+messagerie. Le journal d'audit devient alors lisible par agent.
+
+</Callout>
+
+## Déclarer le serveur dans votre client
+
+<Tabs items={['Claude Code', 'Codex', 'Cursor', 'OpenCode']}>
+  <Tab value="Claude Code">
+
+`.mcp.json` à la racine du projet (ou configuration globale) :
+
+```json
+{
+  "mcpServers": {
+    "akooti": {
+      "command": "akooti",
+      "args": ["mcp", "--token", "ak_mcp_…"]
+    }
+  }
+}
+```
+
+  </Tab>
+  <Tab value="Codex">
+
+`~/.codex/config.toml` :
+
+```toml
+[mcp_servers.akooti]
+command = "akooti"
+args = ["mcp", "--token", "ak_mcp_…"]
+startup_timeout_sec = 20
+```
+
+  </Tab>
+  <Tab value="Cursor">
+
+`.cursor/mcp.json` :
+
+```json
+{
+  "mcpServers": {
+    "akooti": {
+      "command": "akooti",
+      "args": ["mcp", "--token", "ak_mcp_…"]
+    }
+  }
+}
+```
+
+  </Tab>
+  <Tab value="OpenCode">
+
+`opencode.json` (projet) ou configuration globale :
+
+```json
+{
+  "mcp": {
+    "akooti": {
+      "type": "local",
+      "command": ["akooti", "mcp", "--token", "ak_mcp_…"],
+      "enabled": true
+    }
+  }
+}
+```
+
+  </Tab>
+</Tabs>
+
+Si `akooti` n'est pas dans le `PATH` de votre agent (souvent le cas des
+applications graphiques sous Linux), indiquez le chemin absolu du binaire dans
+`command`.
+
+## Les six outils
+
+| Outil | Portée | Ce qu'il fait | Ce qu'il retourne |
+| --- | --- | --- | --- |
+| `vault_status` | aucune | Nom du jeton, portées, dossiers, expiration | Métadonnées du jeton |
+| `vault_search` | `read_metadata` | Cherche dans les titres, identifiants et URL | Ids + métadonnées, **aucun secret** |
+| `vault_cdp_autofill` | `blind_fill` | Remplit un formulaire dans une page pilotée par CDP | `{status, fieldsFilled, submitted, detail}` |
+| `vault_blind_autofill` | `blind_fill` | Idem via l'extension — **répond `unavailable` à un agent** | `{status: "unavailable", …}` |
+| `vault_create_and_fill` | `create_and_fill` | Crée un compte jetable (mot de passe généré, TTL) puis remplit le formulaire | Id de l'entrée créée + résultat de remplissage |
+| `vault_exec` | `exec_env` | Lance une commande avec les identifiants en variables d'environnement | Sortie **masquée** (`***`) |
+
+### `vault_search`
+
+Arguments : `query` (chaîne, vide autorisé), `limit` (1 à 200, défaut 25). Une
+requête courte suffit (`docker`, `staging`, `postgres`). Un résultat vide
+signifie « hors des dossiers du jeton » : ne devinez pas d'identifiants.
+
+### Remplissage aveugle (CDP)
+
+C'est le chemin privilégié pour les agents. Arguments de
+`vault_cdp_autofill` : `itemId`, `origin`, `endpoint` (défaut
+`http://127.0.0.1:9222`), `selectors` (facultatif).
+
+Le champ `origin` est **obligatoire**. Akooti refuse de remplir une page dont
+l'URL ne correspond pas à l'origine demandée, et l'échec est stable :
+`no page target matches the requested origin`.
+
+Le résultat prend une de ces formes :
+
+| `status` | Signification | Action |
+| --- | --- | --- |
+| `filled` | Au moins un champ injecté, `fieldsFilled` les nomme | continuer |
+| `partial` | Aucun sélecteur n'a correspondu | corriger `selectors`, rappeler |
+| `failed` | Page, endpoint ou origine refusés ; `detail` porte un code stable | lire `detail` |
+| `unavailable` | Pont Native Messaging absent (chemin extension) | utiliser CDP |
+
+Un champ TOTP rempli apparaît comme `totp` dans `fieldsFilled` ; **le code
+n'est jamais retourné**.
+
+### `vault_create_and_fill`
+
+Arguments : `title`, `url`, `username` (facultatif), `ttlSeconds` (60 à
+2 592 000, défaut **900**), `endpoint`, `selectors`.
+
+Le mot de passe est généré à la volée, l'entrée est créée dans le dossier
+désigné à la création du jeton (« Dossier des comptes créés par l'agent ») et
+**supprimée automatiquement** à l'expiration du TTL. Une entrée jetable n'a pas
+de sélecteurs mémorisés : sans objet `selectors` (`username`, `password`,
+`totp`, `submit`), le remplissage revient `partial` et rien n'est injecté.
+
+### `vault_exec`
+
+Arguments : `itemId`, `command` (tableau d'arguments), `timeoutSeconds` (1 à
+600, défaut 30).
+
+`command[0]` est le programme : **aucun shell n'est impliqué**. Une variable
+`$AKOOTI_PASSWORD` n'est donc interprétée que si vous demandez explicitement un
+shell :
+
+```jsonc
+{
+  "itemId": "3f2b…",
+  "command": ["bash", "-c", "docker login -u \"$AKOOTI_USERNAME\" -p \"$AKOOTI_PASSWORD\""],
+  "timeoutSeconds": 60
+}
+```
+
+Environnement fourni à l'enfant :
+
+| Variable | Contenu |
+| --- | --- |
+| `AKOOTI_USERNAME` | Identifiant de l'entrée |
+| `AKOOTI_PASSWORD` | Mot de passe (ou secret) de l'entrée |
+| `AKOOTI_<CHAMP>` | Une variable par champ personnalisé, nom mis en majuscules |
+
+Il n'y a **pas** de `AKOOTI_TOTP` : un code s'obtient par les outils de
+remplissage, jamais en lisant le coffre. Chaque valeur injectée est remplacée
+par `***` dans la sortie retournée à l'agent.
+
+## Injection aveugle via le navigateur
+
+Deux chemins mènent au DOM, jamais au agent :
+
+```text
+                  (1) chemin CDP — pour les agents
+  agent → akooti mcp → daemon → WebSocket DevTools → page
+
+                  (2) chemin extension — pour l'utilisateur
+  page → script injecté → service worker → pont natif → daemon → page
+```
+
+Le chemin **(1)** est celui que vous pilotez depuis l'agent. Le chemin **(2)**
+est réservé aux remplissages initiés par l'extension ; c'est pour cela que
+`vault_blind_autofill` répond `unavailable` à un agent : il n'existe aucun moyen
+d'ouvrir une connexion Native Messaging depuis un serveur MCP.
+
+### Avec `agent-browser`
+
+Démarrez un Chrome avec un point d'accès DevTools, puis laissez l'agent piloter
+la page et demander le remplissage :
+
+```bash
+# 1. Chrome expose CDP sur 9222
+google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/akooti-agent
+
+# 2. L'agent ouvre la page de connexion
+agent-browser --cdp 9222 open http://localhost:3000/login
+
+# 3. L'agent remplit sans voir le secret
+#    vault_cdp_autofill { "itemId": "3f2b…", "origin": "http://localhost:3000" }
+```
+
+`agent-browser` accepte l'endpoint sous plusieurs formes : `--cdp 9222`,
+`--cdp http://127.0.0.1:9222`, `connect 9222`, ou `--auto-connect` pour
+rattacher un Chrome déjà lancé avec le port de débogage. Le reste est identique :
+`origin` obligatoire, `selectors` seulement si la page n'a pas de sélecteurs
+mémorisés.
+
+### Avec Obscura
+
+Tout navigateur piloté par CDP fait l'affaire : **Obscura** expose le même
+endpoint DevTools (port 9222 par défaut). Connectez-le au port de débogage et
+pointez `vault_cdp_autofill` dessus ; `endpoint` accepte une URL complète si le
+port diffère :
+
+```jsonc
+{ "itemId": "3f2b…", "origin": "http://localhost:3000", "endpoint": "http://127.0.0.1:9223" }
+```
+
+<Callout type="warn" title="Ne remplissez jamais une origine que vous n'avez pas vérifiée">
+
+Akooti refuse une page dont l'URL ne correspond pas à `origin`, mais c'est
+vous qui fournissez `origin`. Sur un site de production, ouvrez d'abord la page
+et lisez son URL réelle. Le refus d'Akooti est une protection contre le
+phishing, pas un substitut à votre jugement.
+
+</Callout>
+
+## Intégrer le `SKILL.md`
+
+Le dépôt fournit un skill prêt à l'emploi : **`skills/akooti/SKILL.md`**. Il
+explique à l'agent les règles d'usage (ne jamais demander un mot de passe,
+vérifier l'origine, préférer `vault_create_and_fill` aux identifiants inventés)
+et les codes d'échec.
+
+Copiez-le dans le répertoire de compétences de votre agent — par exemple
+`~/.claude/skills/akooti/SKILL.md` pour Claude Code — ou ajoutez-le directement
+à son contexte de projet. Ses métadonnées front-matter (`name`, `description`)
+suffisent à le rendre découvrable par les harnais compatibles.
+
+## Journal d'audit
+
+Chaque appel est journalisé dans **Accès IA → Journal d'audit** : une ligne par
+action (`vault_search`, `cdp_autofill`, `blind_autofill`, `create_and_fill`,
+`exec_env`, `passkey_use`, `access_denied`), avec le jeton et l'horodatage —
+**jamais une valeur**.
+
+## Dépannage
+
+| Code | Sens | Action |
+| --- | --- | --- |
+| `daemon_unavailable` | Application fermée ou daemon arrêté | lancer et déverrouiller Akooti |
+| `locked` | Coffre verrouillé (auto-lock 15 min) | déverrouiller |
+| `invalid_credentials` | Jeton inconnu, expiré ou révoqué | réémettre dans **Accès IA** |
+| `forbidden` | Portée ou dossier hors du jeton | élargir le jeton — jamais la demande |
+| `not_found` | Entrée hors dossiers autorisés, ou supprimée | refaire `vault_search` |
+| `invalid_input` | Origine absente, sélecteurs invalides, TTL hors bornes | corriger l'appel |
+| `version_mismatch` | Client et daemon ne parlent pas le même protocole IPC | mettre à jour les deux |
+
+Une boucle de réessai sur `forbidden` ne doit jamais exister : le code signifie
+« demande refusée par conception ».

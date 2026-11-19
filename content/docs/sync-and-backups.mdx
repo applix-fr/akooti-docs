@@ -1,0 +1,354 @@
+---
+title: Synchronisation et sauvegardes
+description: Supabase Realtime E2EE, S3 compatible (MinIO, R2, Wasabi), Google Drive et instantanés locaux — pas à pas.
+---
+
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+Akooti fonctionne entièrement hors ligne : la synchronisation et les sauvegardes
+sont des **options**, jamais des dépendances. Chaque destination reçoit des
+données déjà chiffrées côté client — un projet Supabase, un bucket ou un Drive
+ne voient que des `ciphertext` / `nonce` et des métadonnées techniques.
+
+| Destination | Usage | Ce que le serveur voit |
+| --- | --- | --- |
+| **Supabase Realtime** | Coffre partagé entre machines, mise à jour en continu | Enveloppe Argon2id + enregistrements chiffrés, types d'objet |
+| **S3 / MinIO / R2 / Wasabi** | Instantanés périodiques hors site | Fichiers `.akooti` opaques |
+| **Google Drive** | Instantanés dans un Drive personnel | Fichiers `.akooti` opaques |
+| **Dossier local / NAS** | Instantanés rapides, sans réseau | Fichiers `.akooti` opaques |
+
+Un instantané est un fichier `akooti-<epoch-ms>.akooti` (magic
+`AKOOTI-SNAP1`) : la même enveloppe chiffrée qu'en local, plus une copie
+consistante de la base (un `wal_checkpoint` est forcé avant l'écriture).
+
+## Supabase : synchronisation E2EE
+
+### Ce que fait le script
+
+Le script SQL fourni (également embarqué dans l'application, avec les boutons
+**Copier le script SQL** et **Enregistrer le script…**) crée deux tables et
+leurs garde-fous :
+
+- `public.akooti_vault_envelopes` — une ligne par utilisateur : paramètres
+  Argon2id publics et **clé maître encapsulée**. Rien n'est lisible sans votre
+  mot de passe maître.
+- `public.akooti_sync_records` — dossiers, entrées, passkeys et règles de
+  routage, tous de la **même forme** (type + blob chiffré) : le serveur ne peut
+  même pas compter vos dossiers.
+- RLS `auth.uid() = user_id` sur les deux tables, droits accordés au rôle
+  `authenticated` uniquement (`anon` n'obtient rien).
+- Ajout à la publication `supabase_realtime` pour les notifications de
+  changement, et trigger qui avance `server_updated_at` / `version` à chaque
+  écriture.
+
+Le script est **idempotent** : rejouable après une mise à jour d'Akooti, sans
+rien casser ni créer de données utilisateur.
+
+### Étape 1 — Créer le projet et activer l'authentification e-mail
+
+1. Créer un projet sur [supabase.com](https://supabase.com/dashboard).
+2. **Authentication → Providers → Email** : activer, et désactiver la
+   confirmation par e-mail si vous voulez éviter le détour par la boîte mail.
+3. Créer votre compte (Authentication → Users → Add user), avec e-mail et mot
+   de passe. C'est ce compte qui authentifiera Akooti — il n'a **aucun rapport**
+   avec votre mot de passe maître.
+
+### Étape 2 — Exécuter le script SQL
+
+Dashboard → **SQL Editor** → **New query** → coller l'intégralité du script →
+**Run**. Puis vérifier les deux requêtes de contrôle en fin de script (elles
+doivent renvoyer vos deux tables et vos deux politiques RLS).
+
+<Callout type="warn" title="N'utilisez jamais la clé service_role">
+
+Akooti ne se connecte qu'avec l'**URL du projet** et la clé **anon** (ou
+`sb_publishable_…`). Une clé `service_role` / `sb_secret_…` contourne la RLS :
+ne la mettez jamais dans Akooti, ni dans un fichier, ni dans un prompt.
+
+</Callout>
+
+```sql title="supabase/setup.sql"
+-- =====================================================================
+--  Akooti — schéma Supabase pour la synchronisation chiffrée de bout en bout
+-- =====================================================================
+--
+--  À FAIRE UNE FOIS, dans VOTRE projet Supabase :
+--
+--   1. Ouvrir  https://supabase.com/dashboard/project/_/sql/new
+--      (ou : Dashboard → SQL Editor → New query)
+--   2. Copier TOUT ce fichier, le coller dans l'éditeur.
+--   3. Cliquer « Run ».
+--
+--  Le script est idempotent : il peut être rejoué sans rien casser (utile
+--  après une mise à jour d'Akooti). Il ne crée aucune donnée utilisateur.
+--
+--  Ce que le serveur verra ensuite : uniquement des blobs chiffrés
+--  (`ciphertext`, `nonce`) et des métadonnées techniques. Jamais un titre,
+--  une URL, un nom de dossier ni un secret.
+--
+--  Ne jamais utiliser la clé `service_role` / `sb_secret_…` dans Akooti.
+--  Seules l'URL du projet et la clé `anon` / `sb_publishable_…` y entrent.
+-- =====================================================================
+
+create extension if not exists "pgcrypto";
+
+-- ---------------------------------------------------------------------
+-- Enveloppe cryptographique du coffre (une par utilisateur)
+-- Paramètres Argon2id publics + clé maître encapsulée : rien de lisible.
+-- ---------------------------------------------------------------------
+create table if not exists public.akooti_vault_envelopes (
+    user_id uuid primary key references auth.users(id) on delete cascade,
+    vault_id uuid not null,
+    kdf_algorithm text not null default 'argon2id',
+    kdf_salt text not null,
+    kdf_memory_kib integer not null default 65536,
+    kdf_iterations integer not null default 3,
+    kdf_parallelism integer not null default 4,
+    wrapped_master_key text not null,
+    wrapped_key_nonce text not null,
+    updated_at timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------------
+-- Enregistrements chiffrés : dossiers, entrées, passkeys et règles ont
+-- tous la même forme, donc le serveur ne peut pas compter les dossiers.
+-- ---------------------------------------------------------------------
+create table if not exists public.akooti_sync_records (
+    id uuid not null,
+    user_id uuid not null references auth.users(id) on delete cascade,
+    record_type text not null check (record_type in ('folder', 'item', 'passkey', 'routing_rule')),
+    ciphertext text not null,
+    nonce text not null,
+    version bigint not null default 1,
+    client_updated_at timestamptz not null,
+    server_updated_at timestamptz not null default now(),
+    is_deleted boolean not null default false,
+    primary key (user_id, id)
+);
+
+create index if not exists idx_sync_records_delta
+    on public.akooti_sync_records (user_id, server_updated_at);
+
+-- ---------------------------------------------------------------------
+-- `server_updated_at` est le curseur de synchronisation : il avance à
+-- chaque écriture (jamais à la lecture) ; `version` est bumpée ici pour
+-- que les appareils n'aient pas à se coordonner.
+-- ---------------------------------------------------------------------
+create or replace function public.akooti_touch_sync_record()
+returns trigger
+language plpgsql
+as $$
+begin
+    new.server_updated_at := now();
+    if tg_op = 'UPDATE' then
+        new.version := old.version + 1;
+    end if;
+    return new;
+end;
+$$;
+
+drop trigger if exists trg_akooti_sync_timestamp on public.akooti_sync_records;
+create trigger trg_akooti_sync_timestamp
+    before insert or update on public.akooti_sync_records
+    for each row execute function public.akooti_touch_sync_record();
+
+-- ---------------------------------------------------------------------
+-- RLS : un utilisateur ne lit et n'écrit que ses propres lignes, même
+-- avec la clé anon.
+-- ---------------------------------------------------------------------
+alter table public.akooti_vault_envelopes enable row level security;
+alter table public.akooti_sync_records enable row level security;
+
+drop policy if exists "Users manage own vault envelope" on public.akooti_vault_envelopes;
+create policy "Users manage own vault envelope"
+    on public.akooti_vault_envelopes for all
+    using (auth.uid() = user_id)
+    with check (auth.uid() = user_id);
+
+drop policy if exists "Users manage own sync records" on public.akooti_sync_records;
+create policy "Users manage own sync records"
+    on public.akooti_sync_records for all
+    using (auth.uid() = user_id)
+    with check (auth.uid() = user_id);
+
+-- PostgREST s'exécute sous le rôle `authenticated` ; on lui donne les
+-- droits de table, la RLS restant le vrai verrou. `anon` n'obtient rien.
+grant select, insert, update, delete on public.akooti_vault_envelopes to authenticated;
+grant select, insert, update, delete on public.akooti_sync_records to authenticated;
+
+-- ---------------------------------------------------------------------
+-- Realtime : la même RLS s'applique aux événements de changement.
+-- ---------------------------------------------------------------------
+do $$
+begin
+    if not exists (
+        select 1 from pg_publication_tables
+        where pubname = 'supabase_realtime'
+          and schemaname = 'public'
+          and tablename = 'akooti_sync_records'
+    ) then
+        alter publication supabase_realtime add table public.akooti_sync_records;
+    end if;
+end;
+$$;
+
+-- Recharge le cache de schéma de PostgREST pour que les tables soient
+-- visibles immédiatement (sinon attendre quelques secondes).
+notify pgrst, 'reload schema';
+
+-- ---------------------------------------------------------------------
+-- Vérification : ces requêtes doivent renvoyer les objets ci-dessus.
+-- ---------------------------------------------------------------------
+select 'akooti_vault_envelopes' as objet, count(*) as lignes
+from public.akooti_vault_envelopes
+union all
+select 'akooti_sync_records', count(*) from public.akooti_sync_records;
+
+select schemaname, tablename, policyname, cmd
+from pg_policies
+where schemaname = 'public' and tablename like 'akooti_%'
+order by tablename, policyname;
+```
+
+### Étape 3 — Configurer Akooti
+
+Dans l'application → **Synchronisation** :
+
+| Champ | Valeur |
+| --- | --- |
+| URL du projet Supabase | `https://<projet>.supabase.co` |
+| Clé anon | la clé `anon` / `sb_publishable_…` du projet |
+| E-mail | le compte créé à l'étape 1 |
+| Mot de passe Supabase | le mot de passe de ce compte |
+
+Puis **Se connecter**, et **Synchroniser maintenant** pour le premier échange
+complet.
+
+### Comment la fusion se décide
+
+- **Curseur** : chaque appareil ne demande que les lignes dont
+  `server_updated_at` a bougé depuis sa dernière passe.
+- **Dernière écriture gagne**, sur `client_updated_at` ; à égalité, la ligne
+  arrivante gagne.
+- **Suppressions** : une ligne disparue devient un tombstone (`is_deleted`),
+  jamais une suppression physique — sinon la suppression ne se propagerait pas.
+- **Temps réel** : les changements arrivent par `supabase_realtime`, la même
+  RLS s'applique aux événements.
+
+### Dépannage
+
+| Symptôme | Cause probable | Action |
+| --- | --- | --- |
+| `PGRST205` / table introuvable | script SQL non exécuté, ou cache PostgREST froid | rejouer le script, attendre quelques secondes |
+| Connexion refusée | confirmation e-mail obligatoire et compte non confirmé | confirmer le compte, ou désactiver la confirmation |
+| Aucune donnée après sync | clé `service_role` utilisée, ou mauvais projet | utiliser la clé `anon` du bon projet |
+| Conflit permanent sur une entrée | horloges machine très décalées | resynchroniser l'heure (NTP) |
+
+## S3 compatible (MinIO, R2, Wasabi, AWS)
+
+**Sauvegardes** → **Ajouter une cible** → fournisseur
+*S3 compatible (AWS, R2, MinIO, Wasabi)*.
+
+| Champ | Rôle |
+| --- | --- |
+| Nom | Libellé libre de la cible |
+| Endpoint | `https://s3.amazonaws.com`, `https://<compte>.r2.cloudflarestorage.com`, `http://minio.local:9000`, … |
+| Région | `eu-west-3`, `auto` pour R2, `us-east-1` par défaut pour MinIO |
+| Bucket | bucket existant, dédié si possible |
+| Préfixe | sous-dossier facultatif (`akooti/`) |
+| Clé d'accès / Clé secrète | identifiants du service |
+
+Signatures **SigV4**, adressage *path-style* (indispensable pour MinIO et
+Wasabi). Un bucket privé suffit : Akooti n'a besoin ni de site statique, ni de
+CORS.
+
+```bash
+# MinIO local, création du bucket avant de configurer la cible
+mc alias set akooti http://minio.local:9000 <access> <secret>
+mc mb akooti/akooti-backups
+```
+
+Politique minimale à accorder à la clé : `s3:PutObject`, `s3:GetObject`,
+`s3:DeleteObject`, `s3:ListBucket` sur ce bucket et son préfixe.
+
+Cliquez **Tester** (écriture puis relecture d'un objet témoin), puis
+**Sauvegarder** pour forcer un premier instantané immédiat.
+
+## Google Drive
+
+**Sauvegardes** → fournisseur *Google Drive*.
+
+1. Créer un **ID client OAuth 2.0** dans la Google Cloud Console (type
+   *Desktop app*).
+2. Obtenir un **refresh token** avec le scope `drive.file` — le plus restrictif
+   qui autorise l'écriture de fichiers créés par l'application. Pour un usage
+   personnel, l'OAuth Playground suffit : autoriser le scope, échanger le code,
+   copier le refresh token.
+3. Renseigner `Client id`, `Client secret` et `Refresh token`.
+4. Facultatif : un **identifiant de dossier Drive** si vous ne voulez pas la
+   racine.
+
+<Callout type="info" title="État de la recette">
+
+Le client a été validé contre un émulateur d'API Google Drive v3, pas encore
+contre un compte Google réel. En cas d'échec, commencez par vérifier le
+refresh token et le scope, puis testez la cible avec le bouton **Tester**.
+
+</Callout>
+
+## Instantanés locaux et NAS
+
+Fournisseur *Dossier local / NAS* : pointez un chemin monté (NFS, SMB, disque
+externe). C'est la sauvegarde la plus rapide et celle qui dépend du moins de
+choses. Un dossier versionné par `borg`/`restic`/ZFS fait un excellent second
+niveau.
+
+## Planification et rétention
+
+| Réglage | Valeur |
+| --- | --- |
+| Intervalle | minutes, **minimum 60** |
+| Instantanés conservés | nombre de fichiers gardés, **minimum 1** (le plus récent n'est jamais supprimé) |
+| Ordonnanceur | réveil toutes les 60 s, déclenchement si `dernière exécution + intervalle ≤ maintenant` |
+
+La rétention ne supprime que les fichiers qui commencent par le préfixe
+`akooti-` : un bucket partagé n'est jamais nettoyé par erreur.
+
+## Restaurer
+
+<Steps>
+<Step>
+
+Coffre **verrouillé**, depuis l'écran de déverrouillage → **Restaurer un
+instantané** → choisir le fichier `.akooti`.
+
+</Step>
+<Step>
+
+Saisir le mot de passe maître **de l'instantané** (celui en vigueur au moment de
+la sauvegarde).
+
+</Step>
+<Step>
+
+Confirmer : la restauration **remplace** le coffre local. Exportez d'abord un
+instantané du coffre courant si vous avez un doute.
+
+</Step>
+</Steps>
+
+## Export et sauvegardes manuelles
+
+- **Exporter un instantané** — produit un `.akooti` chiffré, parfait pour une
+  clé USB ou un coffre-fort de fichiers.
+- **Exporter en clair (JSON)** — export lisible, pour migrer vers un autre
+  outil. À manier comme un secret : il l'est. Effacez-le après usage.
+
+<Callout type="warn" title="Checklist minimale">
+
+1. Un instantané automatique vers un support **hors de la machine**.
+2. Le mot de passe maître noté **ailleurs** que sur cette machine.
+3. Une restauration testée au moins une fois — une sauvegarde jamais restaurée
+   n'est pas une sauvegarde.
+
+</Callout>

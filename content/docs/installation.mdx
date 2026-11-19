@@ -1,0 +1,258 @@
+---
+title: Installation
+description: Installer l'application desktop (Linux, macOS, Windows) et l'extension navigateur WXT (Chrome, Brave, Edge, Firefox).
+---
+
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+Akooti est un binaire unique (Rust + WebView système). Aucun service n'est
+installé, aucun compte n'est créé, rien n'est envoyé sans votre geste.
+
+## Application desktop
+
+### Depuis une release
+
+Téléchargez le bundle de votre plateforme depuis
+[github.com/STIFLEUR390/akooti/releases](https://github.com/STIFLEUR390/akooti/releases),
+puis vérifiez l'empreinte publiée à côté de l'archive (`SHA256SUMS`).
+
+<Tabs items={['Linux (Fedora, Debian/Ubuntu)', 'macOS', 'Windows']}>
+  <Tab value="Linux (Fedora, Debian/Ubuntu)">
+
+Deux formats sont produits : `.deb` et `.AppImage`.
+
+```bash
+# Debian / Ubuntu
+sudo apt install ./Akooti_<version>_amd64.deb
+
+# Fedora / toute distribution : AppImage
+chmod +x Akooti_<version>_amd64.AppImage
+./Akooti_<version>_amd64.AppImage
+```
+
+Le paquet `.deb` déclare ses dépendances. Sur Fedora, l'AppImage suffit ; les
+bibliothèques nécessaires sont :
+
+```bash
+sudo dnf install webkit2gtk4.1 libayatana-appindicator-gtk3
+```
+
+  </Tab>
+  <Tab value="macOS">
+
+Le `.dmg` est produit pour **Apple Silicon** (`aarch64-apple-darwin`) et
+**Intel** (`x86_64-apple-darwin`). Ouvrez le `.dmg`, glissez **Akooti** dans
+`/Applications`, lancez l'application.
+
+  </Tab>
+  <Tab value="Windows">
+
+<Callout type="warn" title="Windows n'est pas encore distribué">
+
+Le transport IPC d'Akooti est un **socket Unix** (`akooti-ipc`), et le manifeste
+Native Messaging vit dans le registre sous Windows. Le named pipe et
+l'enregistrement registre sont conçus (ADR 0006) mais pas implémentés : aucune
+release Windows (`.msi` / NSIS) n'est publiée, et un build local échouerait au
+démarrage du daemon.
+
+Les chemins ci-dessous sont la **cible** documentée, pas un état livré :
+`%APPDATA%\com.akooti.desktop\` pour les données, `HKCU\Software\Google\Chrome\NativeMessagingHosts\org.akooti.host`
+pour le pont.
+
+</Callout>
+
+  </Tab>
+</Tabs>
+
+### Depuis les sources
+
+Prérequis : [Rust 1.90+](https://rustup.rs), [Bun 1.4+](https://bun.sh) et les
+bibliothèques système de votre distribution.
+
+```bash
+git clone https://github.com/STIFLEUR390/akooti
+cd akooti
+bun install
+bun run tauri dev      # développement (Vite + application)
+bun run tauri build    # bundles dans target/release/bundle/
+```
+
+Dépendances Linux (Fedora) :
+
+```bash
+sudo dnf install webkit2gtk4.1-devel libappindicator-gtk3-devel \
+  librsvg2-devel openssl-devel gcc pkg-config
+```
+
+<Callout type="info" title="Fedora : appindicator sans en-têtes de développement">
+
+Le CLI Tauri cherche `ayatana-appindicator3-0.1.pc`, absent quand seul le
+runtime est installé. Contournement local avant `bun run tauri build` :
+
+```bash
+mkdir -p /tmp/appindicator-lib /tmp/pkgconfig
+ln -sf /lib64/libayatana-appindicator3.so.1 /tmp/appindicator-lib/libayatana-appindicator3.so
+ln -sf /lib64/libayatana-appindicator3.so.1 /tmp/appindicator-lib/libayatana-appindicator3.so.1
+# /tmp/pkgconfig/ayatana-appindicator3-0.1.pc : libdir=/tmp/appindicator-lib, Libs: -layatana-appindicator3
+PKG_CONFIG_PATH=/tmp/pkgconfig bun run tauri build
+```
+
+Sur Ubuntu, `libayatana-appindicator3-dev` fournit tout.
+
+</Callout>
+
+## Premier lancement
+
+<Steps>
+<Step>
+
+**Créer le coffre.** Écran d'accueil → **Nouveau coffre** (si aucun coffre
+n'existe).
+
+</Step>
+<Step>
+
+**Choisir un mot de passe maître** de 12 caractères minimum. Une phrase de
+passe générée par Akooti est idéale. Notez-la **hors de cette machine** : il
+n'existe aucune récupération.
+
+</Step>
+<Step>
+
+**Suivre le guide de démarrage** : cinq étapes vers les écrans réels (importer,
+créer un jeton IA, configurer une sauvegarde, lancer un audit).
+
+</Step>
+<Step>
+
+**Restaurer un coffre existant** (facultatif) : écran de déverrouillage →
+**Restaurer un instantané** → choisir un fichier `.akooti`. La restauration
+**remplace** le coffre local et exige le mot de passe maître de l'instantané.
+
+</Step>
+</Steps>
+
+Le message « aucun lecteur d'empreintes branché » est normal : la biométrie
+n'est pas livrée (ADR 0005).
+
+## Mises à jour
+
+**Akooti → Vérifier les mises à jour** dans la barre latérale. L'application
+vérifie un manifeste signé (Ed25519) et **refuse** toute mise à jour dont la
+signature ne correspond pas à la clé publique embarquée dans le binaire.
+
+## Désinstaller
+
+Désinstaller le paquet retire le binaire, **pas** vos données. Le coffre vit
+dans le dossier de données de l'application :
+
+| Système | Dossier |
+| --- | --- |
+| Linux | `~/.local/share/com.akooti.desktop/` |
+| macOS | `~/Library/Application Support/com.akooti.desktop/` |
+| Windows (cible) | `%APPDATA%\com.akooti.desktop\` |
+
+Sauvegardez d'abord un `.akooti` (voir [Sync et sauvegardes](/docs/sync-and-backups)),
+puis supprimez ce dossier : il n'y a aucune récupération possible ensuite.
+
+## Extension navigateur (WXT)
+
+Un seul source, compilé vers Chrome, Edge, Brave (MV3, Chrome ≥ 116) et Firefox
+(MV2, ≥ 115). L'extension ne fait **aucun appel réseau** : son unique route vers
+le coffre est le pont Native Messaging `org.akooti.host`.
+
+### Compiler
+
+```bash
+bun install
+bun run --filter @akooti/extension build           # Chrome / Brave / Edge
+bun run --filter @akooti/extension build:firefox   # Firefox
+```
+
+Sorties : `.output/chrome-mv3` et `.output/firefox-mv2`. Pour produire des
+archives destinées à un store : `bun run --filter @akooti/extension zip` et
+`zip:firefox`.
+
+### Charger dans le navigateur
+
+<Tabs items={['Chrome / Brave / Edge', 'Firefox']}>
+  <Tab value="Chrome / Brave / Edge">
+
+1. Ouvrir `chrome://extensions` (ou `brave://extensions`,
+   `edge://extensions`).
+2. Activer le **mode développeur**.
+3. **Charger l'extension non empaquetée** → choisir `.output/chrome-mv3`.
+4. Relever l'**ID** affiché sur la carte de l'extension : il est dérivé du
+   chemin du dossier et sert à autoriser le pont natif.
+
+  </Tab>
+  <Tab value="Firefox">
+
+1. Ouvrir `about:debugging#/runtime/this-firefox`.
+2. **Charger un module temporaire…** → choisir `.output/firefox-mv2/manifest.json`.
+3. L'add-on id épinglé est `extension@akooti.local` (il doit correspondre au
+   manifeste natif). Un module temporaire disparaît au redémarrage ; une
+   installation permanente exige une signature (AMO ou `web-ext sign`).
+
+  </Tab>
+</Tabs>
+
+### Enregistrer le pont natif
+
+Le navigateur refuse de lancer un hôte natif qui n'est pas déclaré. La commande
+`akooti native-register` écrit ce manifeste, par navigateur et par OS.
+
+```bash
+# Chromium : l'ID de l'extension est obligatoire
+akooti native-register --extension-id <id-chrome-extension>
+
+# Un seul navigateur
+akooti native-register --browser brave --extension-id <id>
+
+# Firefox : id épinglé par défaut (extension@akooti.local)
+akooti native-register --browser firefox
+
+# Vérifier sans écrire, réparer, ou supprimer
+akooti native-register --check
+akooti native-register --uninstall
+```
+
+Options utiles : `--browser <nom>` (répétable ou séparé par des virgules :
+`chrome`, `chromium`, `edge`, `brave`, `firefox` ; défaut : tous), `--host <chemin absolu>`
+(par défaut, le binaire courant), `--home <chemin>` (installation scriptée ou
+bac à sable), `--firefox-id <id>`.
+
+Emplacements écrits sous Linux :
+
+| Navigateur | Manifeste |
+| --- | --- |
+| Chrome | `~/.config/google-chrome/NativeMessagingHosts/org.akooti.host.json` |
+| Chromium | `~/.config/chromium/NativeMessagingHosts/org.akooti.host.json` |
+| Edge | `~/.config/microsoft-edge/NativeMessagingHosts/org.akooti.host.json` |
+| Brave | `~/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts/org.akooti.host.json` |
+| Firefox | `~/.mozilla/native-messaging-hosts/org.akooti.host.json` |
+
+Sous macOS, la racine est `~/Library/Application Support/` (`Google/Chrome`,
+`Chromium`, `Microsoft Edge`, `BraveSoftware/Brave-Browser`, `Mozilla`), suivie
+de `NativeMessagingHosts/`.
+
+### Appairer l'extension
+
+1. Dans l'application déverrouillée → **Accès IA** → créer un jeton avec les
+   portées **Lire les métadonnées** (`read_metadata`) et **Remplir aveuglément**
+   (`blind_fill`), limité aux dossiers utiles.
+2. Copier le secret (`ak_mcp_…`, affiché **une seule fois**).
+3. Ouvrir la popup de l'extension, coller le jeton, valider.
+
+La pastille d'en-tête indique l'état réel : *non appairé*, *application fermée*,
+*coffre verrouillé*, *coffre déverrouillé*. Le jeton vit dans `storage.local`
+(jamais `storage.sync`), n'est jamais journalisé, et **Dissocier** l'efface.
+
+<Callout type="info" title="Ordre des opérations">
+
+Le daemon doit tourner (application ouverte et déverrouillée). Sans lui, la
+popup affiche « application fermée » et les appels MCP répondent
+`daemon_unavailable`.
+
+</Callout>

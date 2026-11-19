@@ -1,0 +1,11 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "index",
+    "installation",
+    "vault-and-routing",
+    "mcp-and-ai-agents",
+    "sync-and-backups",
+    "importers-and-security"
+  ]
+}

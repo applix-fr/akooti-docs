@@ -1,0 +1,206 @@
+---
+title: Importation et audit de sécurité
+description: Récupérer un coffre depuis Buttercup, Bitwarden, Proton Pass, KeePassXC ou 1Password, puis auditer sa santé — zxcvbn et HIBP k-Anonymity.
+---
+
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+
+Akooti lit les exports natifs des gestionnaires les plus courants. Chaque import
+passe par un aperçu **avant** toute écriture, s'exécute dans **une seule
+transaction** SQLCipher, et propose l'effacement du fichier source une fois le
+succès confirmé.
+
+## Formats reconnus
+
+Le format est détecté automatiquement dans la plupart des cas ; l'écran
+d'import propose de le forcer (**Format**) si besoin.
+
+| Gestionnaire | Fichier attendu | Chiffré ? |
+| --- | --- | --- |
+| **Buttercup** | `.bcup` (coffre natif) | Oui — mot de passe demandé |
+| **Buttercup** | `.csv` | Non |
+| **Bitwarden** | `bitwarden_export_*.json` **non chiffré** | Non — un export chiffré est refusé |
+| **Proton Pass** | `.json` ou `.zip` **non chiffré** | Non — un ZIP chiffré est refusé |
+| **KeePassXC / KeePass** | `.kdbx` (v3 et v4) | Oui — mot de passe de la base |
+| **KeePassXC** | XML ou CSV exporté | Non |
+| **1Password** | `.1pux` (archive) ou `.csv` | Non |
+
+Les exports chiffrés de Bitwarden et Proton Pass utilisent des schémas propres
+que seul le client d'origine sait ouvrir : exportez **sans protection par mot de
+passe**, importez, puis effacez le fichier.
+
+## Importer, pas à pas
+
+<Steps>
+<Step>
+
+**Exporter depuis votre gestionnaire actuel**, en clair.
+
+  <Tabs items={['Buttercup', 'Bitwarden', 'Proton Pass', 'KeePassXC', '1Password']}>
+    <Tab value="Buttercup">
+
+Fichier → **Export** → coffre `.bcup` (gardez-le chiffré : Akooti demandera son
+mot de passe) ou export CSV.
+
+    </Tab>
+    <Tab value="Bitwarden">
+
+Outils → **Exporter le coffre** → **.json**, sans mot de passe de fichier.
+
+    </Tab>
+    <Tab value="Proton Pass">
+
+Paramètres → **Exporter** → **JSON** (ou ZIP non chiffré). Le ZIP chiffré n'est
+pas lisible par un tiers.
+
+    </Tab>
+    <Tab value="KeePassXC">
+
+Le plus simple : donner directement le `.kdbx` — Akooti ouvre les bases v3 et v4
+et en restitue l'arborescence de groupes. Sinon, Base de données → **Exporter**
+→ CSV ou XML.
+
+    </Tab>
+    <Tab value="1Password">
+
+Fichier → **Exporter** → **.1pux**. Le CSV fonctionne aussi mais perd les
+dossiers.
+
+    </Tab>
+  </Tabs>
+
+</Step>
+<Step>
+
+Dans Akooti : **Importer** → **Fichier source** → **Choisir…**.
+
+</Step>
+<Step>
+
+Vérifier l'aperçu : nombre d'entrées, nombre de dossiers, **doublons détectés**
+(bouton *Voir les doublons détectés*). Choisir :
+- « Ignorer les doublons » (défaut) ou « **Importer les doublons au lieu de les
+  ignorer** » ;
+- « **Effacer le fichier source après un import réussi** » ;
+- le rattachement automatique au dossier **Dev Local** pour les cibles locales.
+
+</Step>
+<Step>
+
+Lancer **Importer N entrée(s)**. Le compte-rendu indique les entrées importées,
+ignorées, routées et les éventuels problèmes par entrée.
+
+</Step>
+</Steps>
+
+### Détection des doublons
+
+Deux entrées sont considérées comme doublons si elles partagent la même **URL
+normalisée et le même identifiant** (`UrlAndUsername`), ou si leurs titres se
+ressemblent fortement (`FuzzyTitle`). Le second cas attrape les exports
+successifs d'un même gestionnaire où l'URL a changé de forme.
+Les entrées ignorées ne sont jamais supprimées du source : l'import est
+additif.
+
+### Effacement sécurisé du fichier source
+
+L'option « Effacer le fichier source après un import réussi » n'agit **qu'après**
+validation de la transaction. Akooti réécrit le fichier avant de le supprimer et
+rend compte du nombre d'octets écrasés (`bytes_overwritten`). Si l'effacement
+échoue, le compte-rendu le dit explicitement — le fichier est alors toujours là,
+et c'est à vous de le supprimer.
+
+<Callout type="warn" title="Un export en clair est un secret en clair">
+
+Pendant tout le temps où le fichier existe sur le disque, il est lisible par
+n'importe quel processus de votre session, et par le premier outil de
+synchronisation venu. Importez, vérifiez le compte-rendu, supprimez — et évitez
+de le laisser dans un dossier synchronisé vers un cloud.
+
+</Callout>
+
+## Audit de santé
+
+Deux contrôles, tous deux **déclenchés par vous** (aucun balayage en
+arrière-plan) et sans envoi de secret.
+
+### Force des mots de passe (zxcvbn)
+
+Chaque mot de passe reçoit un score **zxcvbn de 0 à 4**. Le calcul tient compte
+de l'identifiant et du titre de l'entrée comme `user_inputs` : un mot de passe
+qui contient votre pseudo ou le nom du service est dégradé, même s'il est long.
+
+Seul **le score** est persisté (colonne `zxcvbn_score`) — jamais la valeur.
+
+### Fuites connues (HIBP, k-Anonymity)
+
+Akooti applique le protocole k-Anonymity de *Have I Been Pwned* :
+
+1. calcul du SHA-1 du mot de passe **en local** ;
+2. envoi des **5 premiers caractères** hexadécimaux à
+   `https://api.pwnedpasswords.com/range/<préfixe>` ;
+3. réception d'environ un million de suffixes candidats (avec l'en-tête
+   `Add-Padding`) ;
+4. comparaison du suffixe **localement**, sur votre machine.
+
+Le préfixe SHA-1 est persisté (`password_sha1_prefix`), pas le mot de passe. Les
+réponses sont mises en cache **24 heures** en mémoire. Hors ligne ou en cas
+d'échec réseau, le résultat reste « inconnu » : rien n'est bloqué, rien n'est
+inventé, et le drapeau existant n'est pas modifié.
+
+<Callout type="info" title="Ce que HIBP peut déduire">
+
+Une requête ne révèle qu'un préfixe partagé par des centaines de milliers de
+mots de passe : le service ne peut pas savoir lequel vous vérifiez. Il voit
+seulement qu'un client a demandé une plage — et l'ordre de grandeur du volume.
+Aucune valeur de coffre ne part dans la requête.
+
+</Callout>
+
+### Réutilisation et ancienneté
+
+- **Réutilisation** : les mots de passe identiques sont regroupés via un HMAC
+  dérivé de la clé maître — le regroupement est stable entre sessions sans
+  jamais stocker d'empreinte réversible.
+- **Ancienneté** : `age_days` est calculé depuis la dernière modification ; le
+  seuil d'alerte est un réglage d'interface, stocké localement.
+
+### Lire le rapport
+
+Écran **Santé** : **Analyser le coffre**, puis **Vérifier les fuites (HIBP)**
+pour le volet réseau, et **Exporter le rapport** si vous voulez le conserver ou
+le partager.
+
+| Constat | Priorité | Geste |
+| --- | --- | --- |
+| Mot de passe présent dans une fuite | immédiate | changer sur le site, puis mettre à jour l'entrée |
+| Même mot de passe sur plusieurs sites | haute | commencer par le compte le plus sensible |
+| Score zxcvbn ≤ 2 | haute | remplacer par une phrase de passe générée |
+| Mot de passe ancien | moyenne | rotation opportuniste, au fil des connexions |
+
+<Callout type="warn" title="L'audit lit vos secrets — brièvement">
+
+L'analyse zxcvbn et le calcul du SHA-1 s'exécutent dans le processus Rust, sur
+des valeurs déchiffrées en mémoire puis remises à zéro (`zeroize`). Aucune
+valeur n'est écrite sur le disque, aucune n'est journalisée, aucune ne quitte
+la machine en clair.
+
+</Callout>
+
+## Migration depuis un gestionnaire, en pratique
+
+1. **Un seul import à la fois.** Importez, vérifiez le compte-rendu, ouvrez
+   quelques entrées, puis passez au suivant. Un import massif et un rapport non
+   lu sont le meilleur moyen de découvrir un problème trois mois plus tard.
+2. **Vérifiez les champs personnalisés** sur deux ou trois entrées par source :
+   les formats d'export ne s'accordent pas tous sur les champs, les notes et
+   les URI multiples.
+3. **Vérifiez les TOTP.** Un secret TOTP importé produit-il le bon code ? Un
+   décalage ici signifie que le champ a été mal interprété.
+4. **Rangez avant de partager.** Classez les secrets d'agent dans **Agents &
+   MCP** et les comptes de dev dans **Dev Local** *avant* de créer un jeton MCP
+   (voir [Coffre et routage](/docs/vault-and-routing)).
+5. **Supprimez les exports**, puis changez les mots de passe des comptes
+   critiques : un fichier en clair a existé, c'est un risque assumé pendant la
+   migration.

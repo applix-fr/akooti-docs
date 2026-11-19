@@ -1,13 +1,171 @@
 ---
-title: Hello World
-description: Your first document
+title: Présentation
+description: Akooti, le coffre-fort local-first pensé pour les agents IA — philosophie, architecture et modèle de sécurité.
 ---
 
-Welcome to the docs! You can start writing documents in `/content/docs`.
+Akooti est un coffre-fort de mots de passe **local-first**, distribué sous forme
+d'un **binaire Rust unique** (`akooti`) qui embarque l'interface desktop, un
+daemon local, un pont navigateur et un serveur MCP. Les agents IA peuvent s'en
+servir pour se connecter à un service sans jamais recevoir un secret.
 
-## What is Next?
+## Le problème
+
+Les agents de codage (Claude Code, Codex, Cursor, Antigravity) et les
+navigateurs autonomes ont besoin de se connecter à des services : bases de
+données locales, back-offices, comptes de test. Aujourd'hui, cela finit trop
+souvent par un secret collé dans un prompt, un `.env` en clair ou un mot de
+passe dans l'historique du shell.
+
+Akooti renverse le modèle : l'IA **agit** sans **voir**. Elle cherche une entrée
+par son titre, demande un remplissage ou lance une commande, et ne reçoit
+qu'un compte-rendu — « champs remplis : username, password », « sortie masquée :
+`***` ».
+
+## Trois principes
+
+| Principe | Ce que cela veut dire concrètement |
+| --- | --- |
+| **Local-First** | 100 % fonctionnel hors ligne. Le coffre SQLCipher local est la source de vérité ; aucune infrastructure propriétaire n'est requise. La synchronisation et les sauvegardes sont optionnelles. |
+| **Zero-Knowledge** | Toute la cryptographie (dérivation, chiffrement, déchiffrement) se fait côté client. Un projet Supabase, un bucket S3 ou un Drive ne voient que des blobs chiffrés (`ciphertext`, `nonce`) et des métadonnées techniques. |
+| **Zero-Leak** | Aucun outil MCP ne retourne un mot de passe, une clé API ou un code TOTP. Le secret va de la RAM du binaire Rust directement vers sa cible : la page du navigateur, un port CDP ou l'environnement d'un processus enfant. |
+
+## Un binaire, plusieurs modes
+
+Le mode est résolu **avant** le démarrage de l'interface : les modes sans
+fenêtre ne créent ni webview, ni icône de notification.
+
+| Invocation | Rôle |
+| --- | --- |
+| `akooti` | Interface graphique Tauri + icône de notification + **daemon** local |
+| `akooti mcp --token <jeton>` | Serveur MCP sur stdio, lancé par l'agent |
+| `akooti native-host` | Pont Native Messaging pour l'extension navigateur |
+| `akooti native-register` | Installe les manifestes Native Messaging par navigateur |
+| `akooti help` / `akooti version` | Aide et version, sans rien démarrer |
+
+Principe directeur : **un seul processus détient la clé maître**. L'interface,
+le serveur MCP et le pont navigateur n'y ont pas accès ; ils demandent au daemon
+d'agir, et le daemon décide.
+
+```text
++------------------------------------------------------------------------------------+
+|                              SURFACES UTILISATEUR                                  |
+|                                                                                    |
+|   [ App desktop Tauri ]      [ Agent IA via MCP stdio ]        [ Extension WXT ]   |
+|    React + TypeScript        Claude Code, Codex, Cursor…        Chrome/Edge/FF     |
++---------+----------------------------+-------------------------------+-------------+
+          | Tauri IPC                  | JSON-RPC sur stdio            | Native Msg
+          | (capabilities)             | (`akooti mcp --token …`)      | (`org.akooti.host`)
+          v                            v                               v
++---------+----------------------------+-------------------------------+-------------+
+|                        BINAIRE UNIQUE RUST (`akooti`)                              |
+|                                                                                    |
+|   [ Interface + tray ]  <--- IPC local (socket Unix 0600) --->  [ Serveur MCP ]    |
+|            |                        version 2, 1 Mio max             (sans clé)     |
+|            +------------------------------+-----------------------------+          |
+|                                           v                                        |
+|                        +------------------------------------+                      |
+|                        |  Daemon : seul détenteur de la clé  |                     |
+|                        |  `Arc<VaultRuntime>` partagé        |                     |
+|                        |  verrou auto après 15 min           |                     |
+|                        +----------------+-------------------+                      |
++-----------------------------------------|------------------------------------------+
+                                          v
+                         +----------------------------------+
+                         |          `akooti-core`           |
+                         | Argon2id + XChaCha20-Poly1305    |
+                         | SQLCipher, dossiers N:N, TOTP    |
+                         | jetons MCP, audit, routage       |
+                         +----------------+-----------------+
+                                          v
+                    +----------------------------------------+
+                    |            Local (source de vérité)    |
+                    |      `vault.meta` + `vault.db`         |
+                    +----------------------------------------+
+```
+
+### Qui peut lire quoi
+
+| Processus | Détient le mot de passe maître ? | Peut lire un secret ? | Peut écrire dans le coffre ? |
+| --- | --- | --- | --- |
+| Binaire `akooti` (interface) | oui, tant que le coffre est ouvert | oui, via la fenêtre de révélation | oui |
+| Serveur MCP (`akooti mcp`) | **non** | **non** — il ne reçoit que des issues de remplissage | non |
+| Pont Native Messaging | **non** | **non** — il recopie des trames sans les désérialiser | non |
+| Extension navigateur | non | reçoit les valeurs qu'elle injecte, sans les conserver | une ligne `passkeys` par cérémonie WebAuthn |
+| Navigateur cible (CDP) | non | reçoit les valeurs dans le DOM | — |
+| Processus enfant (`vault_exec`) | non | reçoit des variables d'environnement, jamais sur son stdout | — |
+
+Conséquences directes : un agent compromis ne peut pas extraire un mot de
+passe, et arrêter le binaire principal suffit à couper tout accès (le socket
+disparaît, les appels répondent `daemon_unavailable`).
+
+## Compartiments techniques
+
+- **Cœur métier isolé** — `akooti-core` n'importe aucune dépendance Tauri,
+  WebView ou React : testable, portable.
+- **IPC local** — socket Unix `0600` dans un dossier `0700`
+  (`$XDG_RUNTIME_DIR/akooti/daemon.sock`, surchargeable via `AKOOTI_SOCKET`),
+  cadrage JSON préfixé d'une longueur de 4 octets (LE), plafond **1 Mio** par
+  trame, protocole **version 2**. Aucun port TCP, aucun serveur HTTP.
+- **Cryptographie** — Argon2id pour la dérivation, XChaCha20-Poly1305 pour les
+  enveloppes (sync, clés de passkeys, identifiants de sauvegarde),
+  `zeroize::Zeroizing` pour toute clé ou valeur déchiffrée, `OsRng` pour la
+  génération.
+- **Stockage** — SQLCipher (`vault.db`) + en-tête public `vault.meta` (sel et
+  paramètres Argon2id), migrations SQL versionnées.
+- **Extension** — source WXT unique, MV3 (Chrome, Edge, Brave ≥ 116) et MV2
+  (Firefox ≥ 115). Le service worker est le seul client du pont natif ; aucun
+  appel réseau, aucun port.
+
+## Modèle de sécurité
+
+| Menace | Contre-mesure |
+| --- | --- |
+| Un LLM lit un secret | Les outils MCP ne renvoient que des métadonnées ; l'injection est aveugle |
+| Un secret traîne en RAM | `Zeroizing` systématique + verrouillage auto (15 min, mise en veille, action explicite) |
+| Un autre utilisateur lit le socket IPC | Socket `0600` dans un dossier privé `0700`, aucun port TCP |
+| Exfiltration côté cloud | Chiffrement XChaCha20 côté client ; le serveur ne voit que `ciphertext` + `nonce` |
+| Jeton MCP trop permissif | Portées granulaires, liste blanche de dossiers, TTL, révocation immédiate, audit local |
+| Fichier d'import en clair laissé sur le disque | Effacement sécurisé proposé après validation de la transaction SQLCipher |
+| Presse-papiers qui fuit | Effacement automatique **30 s** après copie d'un secret ou d'un TOTP |
+| Un site tiers se fait passer pour l'extension | Manifeste limité à l'id exact de l'extension ; toute connexion non annoncée `native-host` reçoit `access_denied` |
+| Une page hostile déclenche une cérémonie WebAuthn | Shim injecté sous nonce, garde de `rpId`, repli systématique sur le navigateur |
+
+## Limites connues
+
+<Callout type="warn" title="Ce qu'Akooti ne fait pas (encore)">
+
+- **Windows** n'est pas distribué : le transport IPC est un socket Unix et le
+  manifeste Native Messaging y vit dans le registre. Le named pipe est prévu
+  (ADR 0006), sans date.
+- **Biométrie native** : le point d'accroche existe (Windows Hello, Touch ID,
+  Linux Polkit / FIDO2), aucun fournisseur n'est branché ; l'interface masque le
+  contrôle.
+- **Passkeys** : aucune attestation (`fmt: "none"`), aucune vérification de
+  l'utilisateur (drapeau `UP` seul), aucun credential découvrable. Une cérémonie
+  qui exige `userVerification: "required"` ou `residentKey: "required"` est
+  rendue au navigateur.
+- **`vault_blind_autofill`** répond `unavailable` à un agent : le pont natif ne
+  sert que les remplissages initiés par l'extension. Utilisez
+  `vault_cdp_autofill`.
+- **Safari** n'est ni construit ni testé.
+- La recette Google Drive a été faite contre un émulateur d'API v3, pas encore
+  sur un compte Google réel.
+
+</Callout>
+
+## Parcours de lecture
 
 <Cards>
-  <Card title="Learn more about Next.js" href="https://nextjs.org/docs" />
-  <Card title="Learn more about Fumadocs" href="https://fumadocs.dev" />
+  <Card title="Installation" href="/docs/installation">
+    Application desktop (Linux, macOS, Windows) et extension navigateur.
+  </Card>
+  <Card title="Coffre et routage" href="/docs/vault-and-routing">
+    Dossiers système, multi-dossiers, TOTP, passkeys et routage Dev Local.
+  </Card>
+  <Card title="MCP et agents IA" href="/docs/mcp-and-ai-agents">
+    Jetons cloisonnés, six outils, injection CDP, `vault_exec`.
+  </Card>
+  <Card title="Sync et sauvegardes" href="/docs/sync-and-backups">
+    Supabase E2EE, S3/MinIO, Google Drive, instantanés locaux.
+  </Card>
 </Cards>

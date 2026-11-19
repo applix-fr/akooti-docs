@@ -1,0 +1,146 @@
+---
+title: Coffre, dossiers et routage
+description: Dossiers système, appartenance multiple, routage automatique Dev Local, codes TOTP et passkeys.
+---
+
+import { Step, Steps } from 'fumadocs-ui/components/steps';
+
+Le coffre est une base SQLCipher locale, chiffrée par une clé dérivée de votre
+mot de passe maître avec Argon2id. On y range des **entrées** de quatre types :
+`login` (identifiant + mot de passe), `api_key` (clé API + secret), `note`
+(texte libre) et `env_set` (jeu de variables d'environnement). Chaque entrée
+porte ses URL, son mode de correspondance d'URI (`domain`, `host`,
+`starts_with`, `exact`, `regex`) et, si besoin, un secret TOTP.
+
+## Dossiers système
+
+Trois dossiers existent dès la création du coffre. Leur identifiant est figé,
+ils ne peuvent être **ni supprimés ni renommés** (l'API répond
+`SystemFolderProtected`) :
+
+| Dossier | Identifiant | Usage |
+| --- | --- | --- |
+| **Personnel** | `00000000-0000-4000-8000-000000000001` | Tout ce qui n'est pas du développement : identités personnelles, banque, santé. |
+| **Dev Local** | `00000000-0000-4000-8000-000000000002` | Ce que vous voulez voir résolu automatiquement sur `.local`, `.test`, `localhost`. |
+| **Agents & MCP** | `00000000-0000-4000-8000-000000000003` | Les secrets qui peuvent être exposés à des agents, par jetons cloisonnés. |
+
+Vous pouvez créer autant de dossiers libres que vous voulez, les imbriquer par
+thème, et y déplacer des entrées.
+
+<Callout type="info" title="Le cloisonnement des agents, c'est le dossier">
+
+Un jeton MCP ne donne jamais accès « au coffre » : il donne accès aux entrées
+d'une liste de dossiers. Ranger les secrets d'agent dans **Agents & MCP** et
+donner au jeton d'un agent uniquement ce dossier suffit à garantir qu'il ne
+verra ni votre banque, ni votre messagerie. Voir
+[MCP et agents IA](/docs/mcp-and-ai-agents).
+
+</Callout>
+
+## Appartenance multiple
+
+Une entrée peut vivre dans **plusieurs dossiers** à la fois (relation N:N, table
+`item_folders`). C'est ce qui permet, par exemple, d'avoir un compte de test à la
+fois dans **Dev Local** (pour le routage) et dans **Agents & MCP** (pour un
+jeton d'agent), sans dupliquer le secret — donc sans deux copies à faire
+tourner en cas de fuite.
+
+Supprimer une entrée la supprime partout ; supprimer une appartenance ne retire
+que le lien.
+
+## Routage automatique en Dev Local
+
+Un agent s'ouvre sur `http://localhost:3000` et doit se connecter. Akooti
+mémorise quels dossiers correspondent à quelles cibles, et propose **Dev Local**
+dès que l'URL ressemble à un développement local.
+
+Règles installées avec le coffre :
+
+| Cible | Portée |
+| --- | --- |
+| Suffixe `.local` | `*.local` |
+| Suffixe `.test` | `*.test` |
+| Suffixe `.localhost` | `*.localhost` |
+| Hôte exact `localhost` | `localhost` |
+| Hôte exact `127.0.0.1` | `127.0.0.1` |
+
+Quatre types de règles existent : `suffix` (suffixe d'hôte), `exact_host`
+(hôte exact), `cidr` (plage d'adresses) et `regex`.
+
+<Steps>
+<Step>
+
+Ouvrir **Routage Dev Local** dans la barre latérale.
+
+</Step>
+<Step>
+
+Vérifier les règles par défaut ; ajouter le vôtre (par exemple le suffixe
+`acme.` si votre équipe sert `acme.localhost`).
+
+</Step>
+<Step>
+
+Associer la règle à un dossier (typiquement **Dev Local**). La case
+« rattacher automatiquement à l'import » est active par défaut : un coffre
+importé depuis un autre gestionnaire est routé immédiatement.
+
+</Step>
+</Steps>
+
+<Callout type="warn" title="Le routage est non destructif">
+
+Appliquer une règle **ajoute** une appartenance à un dossier ; elle n'en retire
+jamais. Le routage peut donc enrichir un classement existant, jamais le casser.
+Désactivez ou supprimez une règle pour arrêter les ajouts futurs — les
+appartenances déjà créées restent, et se retirent à la main depuis l'entrée.
+
+</Callout>
+
+## Codes TOTP
+
+Une entrée peut porter un secret TOTP en plus de son mot de passe. Génération :
+**6 chiffres**, pas de **30 secondes**, HMAC SHA-1 ou SHA-256. La vérification
+côté application tolère **un pas** de décalage horaire dans chaque sens.
+
+Dans le détail d'une entrée, le bloc « Code TOTP » affiche le code et un
+compte à rebours (« Renouvelé dans 18 s »). Copier le code le place dans le
+presse-papiers et programme son **effacement après 30 secondes**.
+
+Côté agent, un code TOTP n'est **jamais** retourné : `vault_cdp_autofill`
+remplit le champ TOTP de la page au moment où la page en a besoin.
+
+## Passkeys (WebAuthn)
+
+Akooti peut servir de support pour les clés d'accès : clés **ES256 (P-256)**,
+clé privée stockée chiffrée avec un AAD contextuel
+(`akooti:v1:passkey:<id>`), signature directe.
+
+Le parcours est celui de l'extension : la cérémonie `navigator.credentials.*`
+part de la page, le script injecté la transmet au service worker, qui la relaye
+au pont natif — c'est le seul chemin, aucun outil MCP n'expose les passkeys.
+
+<Callout type="warn" title="Portée volontairement limitée">
+
+- **Aucune attestation** : le format est `fmt: "none"`.
+- **Pas de vérification de l'utilisateur** : seul le drapeau `UP` est posé, pas
+  `UV`.
+- **Aucune credential découvrable** (`residentKey: "required"` n'est pas servi).
+- Une cérémonie qui exige la vérification de l'utilisateur ou une clé
+  découvrable est **rendue au navigateur**, qui affiche son propre sélecteur.
+- Pas d'interface de gestion des passkeys dans l'application desktop : elles
+  sont créées et utilisées depuis le navigateur.
+
+</Callout>
+
+## Verrouillage
+
+La clé de chiffrement ne vit qu'en mémoire, dans le daemon. Elle est effacée
+(`zeroize`) et le coffre se verrouille automatiquement :
+
+- après **15 minutes** d'inactivité (réglable) ;
+- à la mise en veille de la machine ;
+- sur une action explicite (**Verrouiller**).
+
+Une fois verrouillé, le daemon répond `locked` à toute demande de secret, et
+l'interface masque les valeurs jusqu'au déverrouillage suivant.
