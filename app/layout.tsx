@@ -1,10 +1,24 @@
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import './global.css';
-import { Inter } from 'next/font/google';
+import { Geist, JetBrains_Mono, Space_Grotesk } from 'next/font/google';
 import type { Metadata } from 'next';
 
-const inter = Inter({
+const body = Geist({
   subsets: ['latin'],
+  variable: '--font-body',
+  display: 'swap',
+});
+
+const display = Space_Grotesk({
+  subsets: ['latin'],
+  variable: '--font-sg',
+  display: 'swap',
+});
+
+const mono = JetBrains_Mono({
+  subsets: ['latin'],
+  variable: '--font-jet',
+  display: 'swap',
 });
 
 export const metadata: Metadata = {
@@ -27,9 +41,13 @@ export const metadata: Metadata = {
 
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (
-    <html lang="en" className={inter.className} suppressHydrationWarning>
-      <body className="flex flex-col min-h-screen">
-        <RootProvider>{children}</RootProvider>
+    <html
+      lang="fr"
+      className={`${body.variable} ${display.variable} ${mono.variable}`}
+      suppressHydrationWarning
+    >
+      <body className="flex min-h-screen flex-col font-sans antialiased">
+        <RootProvider theme={{ defaultTheme: 'dark' }}>{children}</RootProvider>
       </body>
     </html>
   );

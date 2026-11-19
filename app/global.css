@@ -10,3 +10,67 @@ html > body[data-scroll-locked] {
   margin-right: 0px !important;
   --removed-body-scroll-bar-size: 0px !important;
 }
+
+/*
+ * Palette Akooti.
+ * Sombre : reprise exacte de apps/desktop/src/styles.css (le thème canonique du produit).
+ * Clair  : dérivée du même jeu sémantique, accents assombris pour tenir le contraste AA sur blanc.
+ */
+:root {
+  --ak-app: #f5f7fa;
+  --ak-panel: #ffffff;
+  --ak-elevated: #fbfcfe;
+  --ak-well: #eef1f6;
+  --ak-hover: #eaedf3;
+  --ak-line: #dde2ea;
+  --ak-line-strong: #c3cbd7;
+  --ak-ink: #0e1622;
+  --ak-ink-muted: #55606f;
+  --ak-ink-faint: #6b7686;
+  --ak-signal: #1f6feb;
+  --ak-signal-strong: #1454c8;
+  --ak-ok: #0f8a5f;
+  --ak-warn: #9a6208;
+  --ak-danger: #c02b39;
+}
+
+.dark {
+  --ak-app: #0b0f14;
+  --ak-panel: #111821;
+  --ak-elevated: #151d28;
+  --ak-well: #0d141c;
+  --ak-hover: #1b2532;
+  --ak-line: #24303f;
+  --ak-line-strong: #33455c;
+  --ak-ink: #e6edf3;
+  --ak-ink-muted: #95a3b4;
+  --ak-ink-faint: #7d8fa3;
+  --ak-signal: #4f8cf7;
+  --ak-signal-strong: #6ba1ff;
+  --ak-ok: #33c48d;
+  --ak-warn: #e0a63c;
+  --ak-danger: #f2626b;
+}
+
+/* inline : les utilitaires pointent la variable, qui bascule avec .dark sur <html>. */
+@theme inline {
+  --font-sans: var(--font-body), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-sg), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jet), ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-app: var(--ak-app);
+  --color-panel: var(--ak-panel);
+  --color-elevated: var(--ak-elevated);
+  --color-well: var(--ak-well);
+  --color-hover: var(--ak-hover);
+  --color-line: var(--ak-line);
+  --color-line-strong: var(--ak-line-strong);
+  --color-ink: var(--ak-ink);
+  --color-ink-muted: var(--ak-ink-muted);
+  --color-ink-faint: var(--ak-ink-faint);
+  --color-signal: var(--ak-signal);
+  --color-signal-strong: var(--ak-signal-strong);
+  --color-ok: var(--ak-ok);
+  --color-warn: var(--ak-warn);
+  --color-danger: var(--ak-danger);
+}
