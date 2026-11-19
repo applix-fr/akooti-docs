@@ -13,10 +13,16 @@ export const metadata: Metadata = {
   description:
     'Coffre-fort local-first, zero-knowledge et zero-leak pour agents IA : MCP, remplissage aveugle et synchronisation chiffrée.',
   openGraph: {
-    images: [{ url: '/og-image.png', width: 1200, height: 675 }],
+    images: [{ url: '/og-image.png', width: 1200, height: 630 }],
   },
   twitter: { card: 'summary_large_image' },
-  icons: { icon: '/logo-raw.png' },
+  icons: {
+    icon: [
+      { url: '/favicon.ico', sizes: '16x16 32x32 48x48' },
+      { url: '/logo.webp', type: 'image/webp', sizes: '512x512' },
+    ],
+    apple: { url: '/apple-touch-icon.png', sizes: '180x180' },
+  },
 };
 
 export default function Layout({ children }: LayoutProps<'/'>) {
