@@ -22,7 +22,7 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'https://akooti.vercel.app'),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'https://akooti-docs.vercel.app'),
   title: 'Akooti',
   description:
     'Coffre-fort local-first, zero-knowledge et zero-leak pour agents IA : MCP, remplissage aveugle et synchronisation chiffrée.',
